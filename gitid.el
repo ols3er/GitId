@@ -14,8 +14,11 @@
 ;;   - 未展開的 $GitId$ → 展開為完整行
 ;;   - 已展開的 $GitId: FILE,v 1.N ... Exp $ → 版次遞增為 1.(N+1) 並更新日期時間
 ;;
-;; 在程式碼中預先寫好：
-;;   /* $GitId$ */
+;; 在程式碼中預先寫好（支援 4 種註解格式）：
+;;   /* $GitId$ */   — C/C++ 區塊註解
+;;   // $GitId$     — C++/Java/JS 行註解
+;;   # $GitId$      — Shell/Python/Ruby 行註解
+;;   ;; $GitId$     — Lisp/Elisp 行註解
 ;; 存檔或執行 gitid-expand 後會變成例如：
 ;;   /* $GitId: 04LST01.c,v 1.2 2026/02/16 03:38:37 ols3 Exp $ */
 ;; 之後每次存檔會自動把 1.2 變成 1.3、1.3 變成 1.4 …
@@ -80,13 +83,19 @@
           "\\([0-9/]+\\) \\([0-9:]+\\) \\([^ ]*\\) Exp \\$")
   "Regexp matching already-expanded $GitId: FILE,v VERSION DATE TIME USER Exp $.")
 
-;; Match full C comment line (allow newline before \" */\" so we always eat the whole block).
-(defconst gitid--expanded-line-regexp
-  (concat "/\\*[ \t]*"
-          (concat "\\$GitId: \\([^,]+\\),v \\([0-9.]+\\) "
-                  "\\([0-9/]+\\) \\([0-9:]+\\) \\([^ ]*\\) Exp \\$")
-          "\\s-*\\*/")
-  "Regexp matching /* $GitId: ... Exp $ */ as a whole (\\s-* allows newline before */).")
+;; 內層：GitId 內容的 regexp（capture 1-5）
+(defconst gitid--expanded-inner-regexp
+  (concat "\\$GitId: \\([^,]+\\),v \\([0-9.]+\\) "
+          "\\([0-9/]+\\) \\([0-9:]+\\) \\([^ ]*\\) Exp \\$"))
+
+;; 4 種註解：(PREFIX-RE SUFFIX-RE PREFIX-STR SUFFIX-STR)
+;; SUFFIX-RE 為 "" 表示行註解；PREFIX-STR/SUFFIX-STR 為替換時要插入的字串
+(defconst gitid--comment-patterns
+  '(("/\\*[ \t]*" "\\s-*\\*/" "/* " " */")   ; /* ... */
+    ("//[ \t]*" "" "// " "")                 ; // ...
+    ("#[ \t]*" "" "# " "")                   ; # ...
+    (";;[ \t]*" "" ";; " ""))                ; ;; ...
+  "List of (prefix-re suffix-re prefix-str suffix-str) for comment styles.")
 
 (defun gitid--version-increment (version)
   "Increment last number in VERSION string, e.g. \"1.6\" -> \"1.7\", \"1.10\" -> \"1.11\"."
@@ -96,23 +105,32 @@
     (mapconcat 'identity (append (butlast parts) (list new-last)) ".")))
 
 (defun gitid--update-expanded ()
-  "Replace one already-expanded /* $GitId: ... Exp $ */ with incremented version and new date/time.
-Uses delete-region + insert so the old text is always fully removed; one replacement per call."
+  "Replace one already-expanded comment line (/* // # ;;) with incremented version.
+Supports: /* ... */, // ..., # ..., ;; ...
+One replacement per call."
   (save-excursion
     (goto-char (point-min))
-    (when (re-search-forward gitid--expanded-line-regexp nil t)
-      (let ((beg (match-beginning 0))
-            (end (match-end 0))
-            (new (concat "/* "
-                         (gitid--expand-string
-                          (match-string 1)
-                          (gitid--version-increment (match-string 2))
-                          (format-time-string "%Y/%m/%d %H:%M:%S")
-                          (gitid--git-user))
-                         " */")))
-        (delete-region beg end)
-        (goto-char beg)
-        (insert new)))))
+    (catch 'done
+      (dolist (pat gitid--comment-patterns)
+        (let ((pre-re (nth 0 pat))
+              (suf-re (nth 1 pat))
+              (pre-str (nth 2 pat))
+              (suf-str (nth 3 pat)))
+          (let ((full-re (concat pre-re gitid--expanded-inner-regexp suf-re)))
+            (when (re-search-forward full-re nil t)
+              (let* ((beg (match-beginning 0))
+                     (end (match-end 0))
+                     (new (concat pre-str
+                                  (gitid--expand-string
+                                   (match-string 1)
+                                   (gitid--version-increment (match-string 2))
+                                   (format-time-string "%Y/%m/%d %H:%M:%S")
+                                   (gitid--git-user))
+                                  suf-str)))
+                (delete-region beg end)
+                (goto-char beg)
+                (insert new)
+                (throw 'done t)))))))))
 
 (defun gitid-expand ()
   "Replace all $GitId$ in current buffer with date and version.
@@ -145,9 +163,7 @@ $GitId: ... Exp $, increment version and update date/time."
       (goto-char (point-min))
       (if (search-forward "$GitId$" nil t)
           (gitid-expand)
-        (goto-char (point-min))
-        (when (re-search-forward gitid--expanded-line-regexp nil t)
-          (gitid--update-expanded))))))
+        (gitid--update-expanded)))))
 
 ;;;###autoload
 (define-minor-mode gitid-mode
